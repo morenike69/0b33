@@ -144,6 +144,72 @@ created, so a subscription that missed N intervals while stopped is charged
 a wall-clock timer will be overstated and must be rebased or voided against
 `Subscription.lifetime_charged`.
 
+## Concurrent Transactions and Ledger-Sequence Ordering Guarantees
+
+### Overview
+
+On Stellar, all transactions submitted to the network are ordered deterministically by the ledger sequence number (`ledger_sequence`) in which they are included. When multiple transactions are submitted to the network in quick succession—even within a single wall-clock moment—**exactly one will precede the other** in the ledger history. Callers cannot predict which transaction will execute first.
+
+This is particularly important for the emergency stop mechanism, since a billing engine might submit a `charge_subscription` call at the exact moment an admin submits an `enable_emergency_stop` call. One transaction will succeed while the other will be ordered after it.
+
+### Behavior by Ledger-Sequence Position
+
+#### Scenario 1: `charge_subscription` executes first, then `enable_emergency_stop`
+
+**Outcome:** The charge succeeds and updates the subscription's balance and timestamp. The emergency stop then activates. **Result: one successful charge before the stop takes effect.**
+
+```
+Ledger N:   charge_subscription(sub_id) → SUCCESS
+              • Prepaid balance decremented
+              • last_payment_timestamp updated
+              • SubscriptionChargedEvent emitted
+
+Ledger N+k: enable_emergency_stop() → SUCCESS
+              • Flag set to true
+              • Future charges blocked
+              • EmergencyStopEnabledEvent emitted
+```
+
+#### Scenario 2: `enable_emergency_stop` executes first, then `charge_subscription`
+
+**Outcome:** The emergency stop is activated and blocks all subsequent charges. The `charge_subscription` call will fail with `Error::EmergencyStopActive`. **Result: no charge, stop takes effect immediately.**
+
+```
+Ledger N:   enable_emergency_stop() → SUCCESS
+              • Flag set to true
+              • EmergencyStopEnabledEvent emitted
+
+Ledger N+k: charge_subscription(sub_id) → ERROR (EmergencyStopActive)
+              • Subscription state unchanged
+              • No charge occurs
+              • SubscriptionChargeFailedEvent emitted with reason
+```
+
+### Key Guarantees for Callers
+
+1. **Deterministic ordering**: Once both transactions are confirmed on-chain (found in a ledger), their relative order is fixed and immutable.
+
+2. **No partial overlaps**: The emergency stop check is atomic—it reads the flag from storage at the start of the charge operation. Either the flag is off (charge proceeds) or on (charge fails). There is no in-between state.
+
+3. **Exactly one succeeds**: In any race between `charge_subscription` and `enable_emergency_stop`, one will be ordered first. The first-ordered transaction succeeds, and the second sees the resulting state (either normal operation or stopped).
+
+4. **No retry-induced duplication**: If a `charge_subscription` fails due to an active stop, retrying it in a later ledger will continue to fail until the stop is disabled. Idempotency keys prevent accidental duplicate charges if the transaction is resubmitted before confirmation.
+
+5. **Events are immutable**: Once a transaction is included in a ledger, its events (e.g., `SubscriptionChargedEvent`, `EmergencyStopEnabledEvent`) are part of the immutable ledger history and can be relied upon for reconciliation.
+
+### Caller Recommendations
+
+1. **Do not assume order**: Design your system to tolerate both outcomes. Callers should:
+   - Query the subscription state after an expected charge to verify it occurred.
+   - Check `get_emergency_stop_status()` before initiating charges to reduce the likelihood of races.
+   - Use event streams or polling to detect the final state rather than relying on expected ordering.
+
+2. **Use idempotency keys**: When submitting a `charge_subscription`, provide an idempotency key to ensure that network retries do not cause duplicate charges.
+
+3. **Monitor events**: Listen for `SubscriptionChargedEvent` or `SubscriptionChargeFailedEvent` to confirm the outcome, rather than assuming based on submitted intent.
+
+4. **Reconciliation**: If you need to reconcile charges off-chain, use the `get_subscription()` query to check `last_payment_timestamp` and `prepaid_balance` as the source of truth.
+
 ## Operations During Emergency Stop
 
 ### Blocked Operations (Financial Risk)

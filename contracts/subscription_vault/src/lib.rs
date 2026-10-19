@@ -62,7 +62,7 @@ mod test_merchant_query_ordering;
 #[cfg(test)]
 mod test_subscription_transfer;
 #[cfg(test)]
-mod test_batch_charge_mixed_status;
+mod test_emergency_stop_concurrent_charge;
 mod types;
 mod validation;
 
