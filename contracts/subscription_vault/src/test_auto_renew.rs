@@ -679,3 +679,156 @@ mod test_auto_renew {
         assert!(sub_charged.prepaid_balance < PREPAID);
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Issue #347 — auto_renew flag enforced identically in single-charge and batch
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The single-charge path (`charge_subscription`) and the batch path
+// (`batch_charge`) both call `charge_one` in `charge_core.rs`. The auto_renew
+// gate inside `charge_one` therefore applies to both paths via the same code.
+//
+// These tests exercise the single-charge path explicitly so that any future
+// refactor that diverges the two paths will produce a test failure.
+
+#[cfg(test)]
+mod test_auto_renew_single_charge {
+    use crate::{ChargeExecutionResult, DataKey, Error, SubscriptionStatus, SubscriptionVault, SubscriptionVaultClient};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger as _},
+        Address, Env,
+    };
+
+    const INTERVAL: u64 = 30 * 24 * 60 * 60;
+    const AMOUNT: i128 = 10_000_000;
+    const PREPAID: i128 = 120_000_000;
+    const T0: u64 = 1_000_000;
+
+    fn setup() -> (Env, SubscriptionVaultClient<'static>, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| {
+            l.timestamp = T0;
+            l.sequence_number = 1;
+        });
+        let contract_id = env.register(SubscriptionVault, ());
+        let client = SubscriptionVaultClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        client.init(&token, &6, &admin, &1_000_000i128, &(7 * 24 * 60 * 60));
+        (env, client, token, admin)
+    }
+
+    fn create_funded(env: &Env, client: &SubscriptionVaultClient) -> (u32, Address, Address) {
+        let subscriber = Address::generate(env);
+        let merchant = Address::generate(env);
+        let id = client.create_subscription(
+            &subscriber,
+            &merchant,
+            &AMOUNT,
+            &INTERVAL,
+            &false,
+            &None::<i128>,
+            &None::<u64>,
+            &None::<Address>,
+        );
+        let mut sub = client.get_subscription(&id);
+        sub.prepaid_balance = PREPAID;
+        env.as_contract(&client.address, || {
+            env.storage().persistent().set(&DataKey::Sub(id), &sub);
+        });
+        (id, subscriber, merchant)
+    }
+
+    fn advance(env: &Env, delta: u64) {
+        env.ledger().with_mut(|l| l.timestamp += delta);
+    }
+
+    /// Single-charge path: when `auto_renew = false` and the interval has
+    /// elapsed, `charge_subscription` must skip (return `Skipped`) rather
+    /// than charging.
+    ///
+    /// This test mirrors `test_charge_skipped_when_auto_renew_disabled` in the
+    /// `test_auto_renew` module but calls `charge_subscription` directly
+    /// instead of going through `batch_charge`, confirming both paths share
+    /// the same `charge_one` gate.
+    #[test]
+    fn test_single_charge_skipped_when_auto_renew_disabled_and_interval_elapsed() {
+        let (env, client, _token, _admin) = setup();
+        let (id, subscriber, _merchant) = create_funded(&env, &client);
+
+        // Disable auto_renew at T0.
+        client.set_auto_renew(&id, &subscriber, &false);
+        let sub = client.get_subscription(&id);
+        assert!(!sub.auto_renew);
+        let balance_before = sub.prepaid_balance;
+
+        // Advance one full interval — the renewal window has now closed.
+        advance(&env, INTERVAL + 1);
+
+        // Direct single-charge — must return Skipped, not charge the subscription.
+        let result = client.charge_subscription(&id, &None::<soroban_sdk::BytesN<32>>);
+        assert_eq!(
+            result,
+            ChargeExecutionResult::Skipped,
+            "charge_subscription must skip when auto_renew=false and interval elapsed (single-charge path)"
+        );
+
+        // Balance must be unchanged — no funds were deducted.
+        let balance_after = client.get_subscription(&id).prepaid_balance;
+        assert_eq!(
+            balance_after, balance_before,
+            "prepaid_balance must not change when charge is skipped due to auto_renew=false"
+        );
+    }
+
+    /// Single-charge path: when `auto_renew = false` but the interval has
+    /// NOT yet elapsed, `charge_subscription` must return `IntervalNotElapsed`
+    /// (same as the normal case with auto_renew=true).
+    ///
+    /// This confirms the renewal window logic: within the window the charge
+    /// attempt still gets the normal interval-not-elapsed rejection, not a skip.
+    #[test]
+    fn test_single_charge_blocked_when_auto_renew_disabled_but_interval_not_elapsed() {
+        let (env, client, _token, _admin) = setup();
+        let (id, subscriber, _merchant) = create_funded(&env, &client);
+
+        // Disable auto_renew mid-interval.
+        advance(&env, INTERVAL / 2);
+        client.set_auto_renew(&id, &subscriber, &false);
+
+        // Interval has not elapsed yet — charge must return IntervalNotElapsed,
+        // not Skipped. The skip only fires once the interval boundary has passed.
+        let result = client.try_charge_subscription(&id, &None::<soroban_sdk::BytesN<32>>);
+        assert_eq!(
+            result,
+            Err(Ok(Error::IntervalNotElapsed)),
+            "charge before interval elapsed must return IntervalNotElapsed even when auto_renew=false"
+        );
+    }
+
+    /// Single-charge path: when `auto_renew = true`, a normal charge after the
+    /// interval proceeds as usual. This baseline confirms the gate only fires
+    /// when auto_renew is explicitly false.
+    #[test]
+    fn test_single_charge_proceeds_when_auto_renew_enabled() {
+        let (env, client, _token, _admin) = setup();
+        let (id, _subscriber, _merchant) = create_funded(&env, &client);
+
+        let balance_before = client.get_subscription(&id).prepaid_balance;
+
+        advance(&env, INTERVAL + 1);
+        let result = client.charge_subscription(&id, &None::<soroban_sdk::BytesN<32>>);
+        assert_eq!(
+            result,
+            ChargeExecutionResult::Charged,
+            "charge_subscription must charge when auto_renew=true and interval elapsed"
+        );
+
+        let balance_after = client.get_subscription(&id).prepaid_balance;
+        assert!(
+            balance_after < balance_before,
+            "prepaid_balance must decrease after successful single charge"
+        );
+    }
+}

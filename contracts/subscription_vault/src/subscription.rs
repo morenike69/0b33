@@ -523,7 +523,7 @@ pub fn do_create_subscription(
     sub_account_label: Option<Symbol>,
     proration_enabled: bool,
 ) -> Result<u32, Error> {
-    crate::validation::validate_subscription_amount(amount)?;
+    crate::validation::validate_subscription_amount_for_create(amount, usage_enabled)?;
     let token = crate::admin::get_token(env)?;
 
     // Enforce subscriber-level credit limit for this token before creating a new
@@ -561,7 +561,7 @@ pub fn do_create_subscription_with_token(
     proration_enabled: bool,
 ) -> Result<u32, Error> {
     subscriber.require_auth();
-    crate::validation::validate_subscription_amount(amount)?;
+    crate::validation::validate_subscription_amount_for_create(amount, usage_enabled)?;
 
     crate::blocklist::require_not_blocklisted(env, &subscriber)?;
     crate::blocklist::require_not_blocklisted(env, &merchant)?;
@@ -831,6 +831,7 @@ pub fn do_deposit_funds(
                     timestamp: now,
                     batch_nonce: crate::admin::current_batch_nonce(env),
                     schema_version: crate::types::EVENT_SCHEMA_VERSION,
+                    contract_id: env.current_contract_address(),
                 },
             );
         }
@@ -1098,6 +1099,7 @@ pub fn do_cancel_subscription(
                     timestamp: env.ledger().timestamp(),
                     batch_nonce: crate::admin::current_batch_nonce(env),
                     schema_version: crate::types::EVENT_SCHEMA_VERSION,
+                    contract_id: env.current_contract_address(),
                 },
             );
         }
@@ -1327,6 +1329,7 @@ pub fn do_schedule_cancel(
                     timestamp: now,
                     batch_nonce: crate::admin::current_batch_nonce(env),
                     schema_version: crate::types::EVENT_SCHEMA_VERSION,
+                    contract_id: env.current_contract_address(),
                 },
             );
         }
@@ -1584,6 +1587,7 @@ pub fn do_pause_subscription(
                     timestamp: env.ledger().timestamp(),
                     batch_nonce: crate::admin::current_batch_nonce(env),
                     schema_version: crate::types::EVENT_SCHEMA_VERSION,
+                    contract_id: env.current_contract_address(),
                 },
             );
         }
@@ -1599,7 +1603,13 @@ pub fn do_pause_subscription(
         return Ok(());
     }
 
-    apply_pause(env, subscription_id, sub, authorizer)
+    let role = if authorizer == sub.subscriber {
+        crate::types::PauseInitiatorRole::Subscriber
+    } else {
+        crate::types::PauseInitiatorRole::Merchant
+    };
+
+    apply_pause(env, subscription_id, sub, authorizer, role)
 }
 
 /// Mutation tail shared by single ([`do_pause_subscription`]) and bulk
@@ -1608,12 +1618,14 @@ pub fn do_pause_subscription(
 /// The caller is responsible for **all** authorization and for verifying that
 /// `sub` is neither expired nor already `Paused`. This helper performs the
 /// `Active -> Paused` transition, persists it, and emits [`SubscriptionPausedEvent`].
-/// `authorizer` is recorded verbatim in the emitted event.
+/// `authorizer` is recorded verbatim in the emitted event, and `initiator_role`
+/// communicates whether the pause was subscriber-, merchant-, or admin-initiated.
 fn apply_pause(
     env: &Env,
     subscription_id: u32,
     mut sub: Subscription,
     authorizer: Address,
+    initiator_role: crate::types::PauseInitiatorRole,
 ) -> Result<(), Error> {
     transition_to(&mut sub.status, SubscriptionStatus::Paused)?;
 
@@ -1627,8 +1639,10 @@ fn apply_pause(
         crate::types::SubscriptionPausedEvent {
             subscription_id,
             paused_by: authorizer,
+            initiator_role,
             timestamp: env.ledger().timestamp(),
-            schema_version: crate::types::EVENT_SCHEMA_VERSION,
+            schema_version: crate::types::SUBSCRIPTION_PAUSED_EVENT_SCHEMA_VERSION,
+            contract_id: env.current_contract_address(),
         },
     );
 
@@ -1668,6 +1682,7 @@ pub fn do_resume_subscription(
                     timestamp: env.ledger().timestamp(),
                     batch_nonce: crate::admin::current_batch_nonce(env),
                     schema_version: crate::types::EVENT_SCHEMA_VERSION,
+                    contract_id: env.current_contract_address(),
                 },
             );
         }
@@ -1830,6 +1845,7 @@ fn bulk_pause_one(
                 timestamp: env.ledger().timestamp(),
                 batch_nonce: crate::admin::current_batch_nonce(env),
                 schema_version: crate::types::EVENT_SCHEMA_VERSION,
+                contract_id: env.current_contract_address(),
             },
         );
         return bulk_failed(subscription_id, Error::SubscriptionExpired);
@@ -1840,7 +1856,7 @@ fn bulk_pause_one(
         return bulk_skipped(subscription_id);
     }
 
-    match apply_pause(env, subscription_id, sub, caller.clone()) {
+    match apply_pause(env, subscription_id, sub, caller.clone(), crate::types::PauseInitiatorRole::Admin) {
         Ok(()) => bulk_changed(subscription_id),
         Err(e) => bulk_failed(subscription_id, e),
     }
@@ -1873,6 +1889,7 @@ fn bulk_cancel_one(
                 timestamp: env.ledger().timestamp(),
                 batch_nonce: crate::admin::current_batch_nonce(env),
                 schema_version: crate::types::EVENT_SCHEMA_VERSION,
+                contract_id: env.current_contract_address(),
             },
         );
         return bulk_failed(subscription_id, Error::SubscriptionExpired);
@@ -2320,6 +2337,7 @@ pub fn do_charge_one_off(
                     timestamp: now,
                     batch_nonce: crate::admin::current_batch_nonce(env),
                     schema_version: crate::types::EVENT_SCHEMA_VERSION,
+                    contract_id: env.current_contract_address(),
                 },
             );
         }
@@ -2969,6 +2987,7 @@ pub fn do_deposit_funds_on_behalf(
                     timestamp: now,
                     batch_nonce: crate::admin::current_batch_nonce(env),
                     schema_version: crate::types::EVENT_SCHEMA_VERSION,
+                    contract_id: env.current_contract_address(),
                 },
             );
         }
@@ -3910,6 +3929,7 @@ pub fn do_initiate_transfer(
                     timestamp: env.ledger().timestamp(),
                     batch_nonce: crate::admin::current_batch_nonce(env),
                     schema_version: crate::types::EVENT_SCHEMA_VERSION,
+                    contract_id: env.current_contract_address(),
                 },
             );
         }
