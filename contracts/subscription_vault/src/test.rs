@@ -705,16 +705,22 @@ fn test_state_machine_property_charge_failures_and_recovery_paths_obey_rules() {
             client.deposit_funds(&id, &topup_amount.max(1_000_000), &None::<soroban_sdk::BytesN<32>>);
 
             let after_deposit = client.get_subscription(&id).status;
-            if topup_amount >= AMOUNT {
-                assert_eq!(after_deposit, SubscriptionStatus::Active);
-            } else {
-                assert!(
-                    after_deposit == SubscriptionStatus::InsufficientBalance
-                        || after_deposit == SubscriptionStatus::GracePeriod
-                );
-            }
+            // Deposit alone must NOT auto-transition to Active (#342/#251):
+            // status stays InsufficientBalance or GracePeriod regardless of
+            // how much was deposited. The subscriber must explicitly call
+            // resume_subscription.
+            assert!(
+                after_deposit == SubscriptionStatus::InsufficientBalance
+                    || after_deposit == SubscriptionStatus::GracePeriod
+            );
 
             if topup_amount >= AMOUNT {
+                // Now explicitly resume to transition back to Active.
+                client.resume_subscription(&id, &subscriber);
+                assert_eq!(
+                    client.get_subscription(&id).status,
+                    SubscriptionStatus::Active
+                );
                 env.ledger()
                     .set_timestamp(charge_time + INTERVAL + step as u64 + 1);
                 let charge_again = client.try_charge_subscription(&id, &None::<soroban_sdk::BytesN<32>>);

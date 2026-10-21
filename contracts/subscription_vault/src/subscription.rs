@@ -66,7 +66,8 @@ use crate::safe_math::{safe_add, safe_add_balance, safe_sub, safe_sub_balance};
 use crate::state_machine::transition_to;
 use crate::statements::append_statement;
 use crate::types::{
-    BillingChargeKind, CancellationEscrow, CancellationEscrowReleasedEvent, DataKey, EmergencyWithdrawIntent, Error, FundsDepositedEvent,
+    BillingChargeKind, CancellationEscrow, CancellationEscrowReleasedEvent, DataKey,
+    EmergencyWithdrawIntent, Error, FundsDepositedEvent,
     GlobalCapDefaultUpdatedEvent, LifetimeCapReachedEvent, LifetimeCapUpdatedEvent,
     MerchantCapDefaultUpdatedEvent, PartialRefundEvent, PlanMaxActiveUpdatedEvent, PlanTemplate,
     PlanTemplateUpdatedEvent, SubscriberEmergencyWithdrawEvent, SubscriberWithdrawalEvent,
@@ -874,14 +875,15 @@ pub fn do_deposit_funds(
         },
     );
 
+    // Emit an informational recovery_ready event when the balance is now
+    // sufficient to cover the next charge. This is an off-chain signal only —
+    // the contract does NOT auto-transition to Active on deposit. The
+    // subscriber must explicitly call `resume_subscription` to re-activate.
+    // See docs/subscription_lifecycle.md invariant #5.
     if (sub.status == SubscriptionStatus::InsufficientBalance
         || sub.status == SubscriptionStatus::GracePeriod)
         && sub.prepaid_balance >= sub.amount
     {
-        sub.status = SubscriptionStatus::Active;
-        sub.grace_start_timestamp = None;
-        write_subscription(env, subscription_id, &sub);
-
         env.events().publish(
             (Symbol::new(env, "recovery_ready"), subscription_id),
             SubscriptionRecoveryReadyEvent {
@@ -889,19 +891,6 @@ pub fn do_deposit_funds(
                 subscriber: sub.subscriber.clone(),
                 prepaid_balance: sub.prepaid_balance,
                 required_amount: sub.amount,
-                timestamp: env.ledger().timestamp(),
-                schema_version: crate::types::EVENT_SCHEMA_VERSION,
-            },
-        );
-
-        env.events().publish(
-            (Symbol::new(env, "sub_resumed"), subscription_id),
-            crate::types::SubscriptionResumedEvent {
-                subscription_id,
-                subscriber: sub.subscriber.clone(),
-                merchant: sub.merchant.clone(),
-                authorizer: sub.subscriber.clone(),
-                previous_status: SubscriptionStatus::Paused,
                 timestamp: env.ledger().timestamp(),
                 schema_version: crate::types::EVENT_SCHEMA_VERSION,
             },
@@ -1151,54 +1140,27 @@ fn apply_cancellation(
     if was_active {
         decrement_subscriber_active_count(env, &sub.subscriber);
     }
-    let original_prepaid_balance = sub.prepaid_balance;
     let refund_amount = compute_cancel_refund(sub.prepaid_balance);
-
-    // EFFECTS: zero balance before escrow (CEI pattern).
-    sub.prepaid_balance = 0;
+    let subscriber_addr = sub.subscriber.clone();
     let token_addr = sub.token.clone();
+
+    // EFFECTS (CEI pattern): zero the prepaid balance and persist state before
+    // any external token transfer so a re-entrant call sees a zeroed balance.
+    sub.prepaid_balance = 0;
     write_subscription(env, subscription_id, &sub);
 
-    // Instead of immediately refunding, place the refund into a time-locked
-    // escrow so the merchant has a window to dispute the cancellation (#569).
+    // INTERACTIONS: auto-refund remaining prepaid balance directly to the
+    // subscriber at cancellation time (#343). This is the simplest correct
+    // implementation: the subscriber gets their funds back immediately without
+    // requiring a separate withdraw call. The accounting ledger is decremented
+    // to keep the vault's tracked total in sync with its on-chain token balance.
     if refund_amount > 0 {
-        let now = env.ledger().timestamp();
-        let released_at = now.checked_add(CANCELLATION_ESCROW_WINDOW_SECS)
-            .ok_or(Error::Overflow)?;
-
-        let escrow = CancellationEscrow {
-            subscription_id,
-            amount: refund_amount,
-            token: token_addr.clone(),
-            subscriber: sub.subscriber.clone(),
-            merchant: sub.merchant.clone(),
-            released_at,
-        };
-
-        // Storage corruption or a missed accounting path would let escrow
-        // funds drift from the balance being released — trap instead of
-        // silently persisting a mismatched escrow record.
-        assert_eq!(
-            escrow.amount, original_prepaid_balance,
-            "cancellation escrow amount must equal prepaid_balance at cancellation time"
-        );
-
-        env.storage()
-            .persistent()
-            .set(&DataKey::CancellationEscrow(subscription_id), &escrow);
-
-        env.events().publish(
-            (Symbol::new(env, "cancellation_escrow_opened"), subscription_id),
-            CancellationEscrowOpenedEvent {
-                subscription_id,
-                subscriber: sub.subscriber.clone(),
-                merchant: sub.merchant.clone(),
-                token: token_addr,
-                amount: refund_amount,
-                released_at,
-                timestamp: now,
-                schema_version: crate::types::EVENT_SCHEMA_VERSION,
-            },
+        crate::accounting::sub_total_accounted(env, &token_addr, refund_amount)?;
+        let token_client = soroban_sdk::token::Client::new(env, &token_addr);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &subscriber_addr,
+            &refund_amount,
         );
     }
 
