@@ -1524,3 +1524,203 @@ fn test_is_expired_dual_bound_invariant_randomized() {
         }
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Issue #344 — Expiration boundary: now >= expiration (inclusive)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// These tests are the canonical documentation for the expiration boundary rule.
+// They are intentionally narrow and readable so they serve as a specification,
+// not just a regression guard.
+//
+// Rule: a subscription is expired when current_timestamp >= expires_at.
+// The boundary is INCLUSIVE: the exact expiration timestamp causes expiry.
+//
+// | now          | expires_at | is_expired? |
+// |--------------|-----------|-------------|
+// | expires_at-1 | T         | No          |
+// | expires_at   | T         | Yes (boundary) |
+// | expires_at+1 | T         | Yes         |
+
+/// `Subscription::is_expired` — wall-clock boundary is inclusive.
+///
+/// Directly tests the `is_expired` method (no contract round-trip) to
+/// document and pin the `>=` semantics at the boundary.
+#[test]
+fn test_is_expired_wall_clock_boundary_inclusive() {
+    use crate::types::Subscription;
+    use soroban_sdk::Env;
+
+    let env = Env::default();
+    let placeholder = soroban_sdk::Address::generate(&env);
+    let token = soroban_sdk::Address::generate(&env);
+
+    const EXP: u64 = 10_000;
+
+    let sub = Subscription {
+        subscriber: placeholder.clone(),
+        merchant: placeholder.clone(),
+        token: token.clone(),
+        amount: 1_000_000,
+        interval_seconds: 60,
+        last_payment_timestamp: 0,
+        status: crate::types::SubscriptionStatus::Active,
+        prepaid_balance: 0,
+        usage_enabled: false,
+        lifetime_cap: None,
+        lifetime_charged: 0,
+        start_time: 0,
+        expires_at: Some(EXP),
+        grace_start_timestamp: None,
+        cancel_at: None,
+        auto_renew: true,
+        auto_renew_disabled_at: None,
+        expires_at_ledger: None,
+        sub_account_label: None,
+        proration_enabled: false,
+        auto_pause_threshold: 0,
+    };
+
+    // One second before expiration — NOT expired.
+    assert!(
+        !sub.is_expired(EXP - 1, 0),
+        "timestamp one below expires_at must NOT be expired (now={}, exp={})",
+        EXP - 1,
+        EXP
+    );
+
+    // Exactly at expiration — IS expired (inclusive boundary).
+    assert!(
+        sub.is_expired(EXP, 0),
+        "timestamp equal to expires_at must be expired (now={}, exp={}): \
+         expiration boundary is inclusive (>=)",
+        EXP,
+        EXP
+    );
+
+    // One second after expiration — also expired.
+    assert!(
+        sub.is_expired(EXP + 1, 0),
+        "timestamp one above expires_at must be expired (now={}, exp={})",
+        EXP + 1,
+        EXP
+    );
+}
+
+/// `Subscription::is_expired` — ledger-sequence boundary is also inclusive.
+///
+/// The same `>=` semantics apply to the ledger-sequence bound.
+#[test]
+fn test_is_expired_ledger_sequence_boundary_inclusive() {
+    use crate::types::Subscription;
+    use soroban_sdk::Env;
+
+    let env = Env::default();
+    let placeholder = soroban_sdk::Address::generate(&env);
+    let token = soroban_sdk::Address::generate(&env);
+
+    const EXP_SEQ: u32 = 500;
+
+    let sub = Subscription {
+        subscriber: placeholder.clone(),
+        merchant: placeholder.clone(),
+        token: token.clone(),
+        amount: 1_000_000,
+        interval_seconds: 60,
+        last_payment_timestamp: 0,
+        status: crate::types::SubscriptionStatus::Active,
+        prepaid_balance: 0,
+        usage_enabled: false,
+        lifetime_cap: None,
+        lifetime_charged: 0,
+        start_time: 0,
+        expires_at: None,
+        grace_start_timestamp: None,
+        cancel_at: None,
+        auto_renew: true,
+        auto_renew_disabled_at: None,
+        expires_at_ledger: Some(EXP_SEQ),
+        sub_account_label: None,
+        proration_enabled: false,
+        auto_pause_threshold: 0,
+    };
+
+    // One sequence number below — NOT expired.
+    assert!(
+        !sub.is_expired(0, EXP_SEQ - 1),
+        "sequence one below expires_at_ledger must NOT be expired (seq={}, exp={})",
+        EXP_SEQ - 1,
+        EXP_SEQ
+    );
+
+    // Exactly at the ledger bound — IS expired (inclusive).
+    assert!(
+        sub.is_expired(0, EXP_SEQ),
+        "sequence equal to expires_at_ledger must be expired (seq={}, exp={}): \
+         ledger boundary is inclusive (>=)",
+        EXP_SEQ,
+        EXP_SEQ
+    );
+
+    // One above — also expired.
+    assert!(
+        sub.is_expired(0, EXP_SEQ + 1),
+        "sequence one above expires_at_ledger must be expired (seq={}, exp={})",
+        EXP_SEQ + 1,
+        EXP_SEQ
+    );
+}
+
+/// `charge_subscription` respects inclusive expiration: one second before
+/// the wall-clock expiry the charge succeeds; one second later it is blocked.
+///
+/// This is the end-to-end contract-level counterpart of the unit tests above.
+#[test]
+fn test_charge_one_second_before_expiry_succeeds() {
+    let (env, client, _token_client, token_admin, _) = setup_test_env();
+    let subscriber = soroban_sdk::Address::generate(&env);
+    let merchant = soroban_sdk::Address::generate(&env);
+
+    use soroban_sdk::testutils::Ledger as _;
+
+    let amount = 1_000_000i128;
+    // Put expiry just beyond one interval so we can do one valid charge.
+    let expires_at = T0 + INTERVAL + 1; // one second past the first charge window
+
+    token_admin.mint(&subscriber, &(amount * 10));
+
+    let sub_id = client.create_subscription_with_token(
+        &subscriber,
+        &merchant,
+        &_token_client.address,
+        &amount,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+        &Some(expires_at),
+        &None::<u32>,
+    );
+    client.deposit_funds(&sub_id, &(amount * 5), &None::<soroban_sdk::BytesN<32>>);
+
+    // One second before expiry — charge must succeed.
+    env.ledger().with_mut(|l| l.timestamp = expires_at - 1);
+    let res = client.try_charge_subscription(&sub_id, &None::<soroban_sdk::BytesN<32>>);
+    assert!(
+        res.is_ok(),
+        "charge one second before expires_at must succeed (inclusive boundary check)"
+    );
+
+    // Advance to exactly the expiry. The subscription should now be expired.
+    env.ledger().with_mut(|l| l.timestamp = expires_at);
+    // Verify a second charge is rejected at the inclusive boundary.
+    let res2 = client.try_charge_subscription(&sub_id, &None::<soroban_sdk::BytesN<32>>);
+    assert!(
+        res2.is_err(),
+        "charge at exactly expires_at must be rejected (inclusive boundary)"
+    );
+}
+    assert!(
+        res2.is_err(),
+        "charge at exactly expires_at must be rejected (inclusive boundary)"
+    );
+}

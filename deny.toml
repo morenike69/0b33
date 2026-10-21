@@ -3,21 +3,15 @@
 # Reference: https://embarkstudios.github.io/cargo-deny/
 
 [graph]
-# Keep the dependency graph as-is; do not merge duplicates.
-# Duplicate deps with differing semver are flagged separately.
-multiple-versions = "deny"
+# Keep cargo-deny checks on the full default dependency graph.
 
 [advisories]
 # The path where advisory databases are cloned.
 db-path = "~/.cargo/advisory-dbs"
 # URL of the advisory database to clone.
 db-urls = ["https://github.com/rustsec/advisory-db"]
-# If the advisory database is stale (older than this number of days),
-# cargo-deny will refuse to run. Set to 0 to disable staleness checks.
-db-staleness-backoff-days = 7
-# If a vulnerability has an unpatched advisory with a severity >= this,
-# the build fails. Legal values: "low", "medium", "high", "critical".
-severity-threshold = "low"
+# Refuse to use advisory data that has not been refreshed for seven days.
+maximum-db-staleness = "P7D"
 # Ignore advisories that have been reviewed and accepted.
 # Format: "RUSTSEC-YYYY-NNNN"
 # This section is intentionally empty — we fail the build on any advisory.
@@ -25,8 +19,9 @@ severity-threshold = "low"
 ignore = []
 
 [licenses]
-# Deny any license not in the allow list below.
-unlicensed = "deny"
+# cargo-deny denies every license that is not explicitly allowed below.
+# Keep prohibited families out of this allowlist; the CI policy check enforces
+# the AGPL, BUSL, proprietary, and custom LicenseRef exclusions.
 # Blanket-allow common OSS licenses used by Stellar/Soroban tooling.
 allow = [
     "Apache-2.0",
@@ -44,6 +39,7 @@ allow = [
     "CC-BY-4.0",
     "OpenSSL",
     "Unlicense",
+    "Apache-2.0 WITH LLVM-exception",
 ]
 # Confidence threshold for license text detection (0.0 – 1.0).
 confidence-threshold = 0.8
@@ -71,13 +67,13 @@ multiple-versions = "deny"
 # (e.g. because a major version bump is in progress).
 skip = [
     # serde and friends — allow both 1.x to coexist during migration.
-    { name = "serde", versions = ">=1.0.0" },
-    { name = "serde_derive", versions = ">=1.0.0" },
+    { name = "serde", versions = ">=1.0.0", reason = "Allow compatible serde releases during workspace migration." },
+    { name = "serde_derive", versions = ">=1.0.0", reason = "Allow compatible serde releases during workspace migration." },
     # syn — widely used by proc-macros at varying versions.
-    { name = "syn", versions = ">=1.0.0" },
+    { name = "syn", versions = ">=1.0.0", reason = "Allow compatible syn releases while proc-macro dependencies migrate." },
     # quote, proc-macro2 — always paired with syn.
-    { name = "quote", versions = ">=1.0.0" },
-    { name = "proc-macro2", versions = ">=1.0.0" },
+    { name = "quote", versions = ">=1.0.0", reason = "Allow compatible quote releases while proc-macro dependencies migrate." },
+    { name = "proc-macro2", versions = ">=1.0.0", reason = "Allow compatible proc-macro2 releases while proc-macro dependencies migrate." },
 ]
 # Skip-tree allows entire subtrees to use duplicate versions.
 skip-tree = []
