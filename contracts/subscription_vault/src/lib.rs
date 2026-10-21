@@ -776,7 +776,8 @@ pub use types::{
     SPLIT_CHARGE_EVENT_SCHEMA_VERSION, SUBSCRIBER_WITHDRAWAL_EVENT_SCHEMA_VERSION,
     SUBSCRIPTION_AUTO_PAUSED_EVENT_SCHEMA_VERSION, SUBSCRIPTION_CANCELLED_EVENT_SCHEMA_VERSION,
     SUBSCRIPTION_CHARGED_EVENT_SCHEMA_VERSION, SUBSCRIPTION_CHARGE_FAILED_EVENT_SCHEMA_VERSION,
-    SUBSCRIPTION_EXPIRED_EVENT_SCHEMA_VERSION,
+    SUBSCRIPTION_EXPIRED_EVENT_SCHEMA_VERSION, SUBSCRIPTION_PAUSED_EVENT_SCHEMA_VERSION,
+    PauseInitiatorRole,
 };
 
 /// Maximum number of subscription IDs accepted by a single batch entrypoint.
@@ -2427,17 +2428,30 @@ impl SubscriptionVault {
         subscription_id: u32,
         authorizer: Address,
     ) -> Result<(), Error> {
+        // Read the subscription before the state transition so we can derive
+        // the initiator role from the pre-transition record.
+        let sub_pre = queries::get_subscription(&env, subscription_id)?;
+        let initiator_role = if authorizer == sub_pre.subscriber {
+            crate::types::PauseInitiatorRole::Subscriber
+        } else if authorizer == sub_pre.merchant {
+            crate::types::PauseInitiatorRole::Merchant
+        } else {
+            // Caller is neither subscriber nor merchant; do_pause_subscription
+            // will reject with Forbidden — role is moot but we must provide one.
+            crate::types::PauseInitiatorRole::Admin
+        };
+
         subscription::do_pause_subscription(&env, subscription_id, authorizer.clone())?;
         let timestamp = env.ledger().timestamp();
 
-        let sub = queries::get_subscription(&env, subscription_id)?;
         env.events().publish(
             (Symbol::new(&env, "sub_paused"), subscription_id),
             SubscriptionPausedEvent {
                 subscription_id,
                 paused_by: authorizer,
+                initiator_role,
                 timestamp,
-                schema_version: crate::types::BASE_EVENT_SCHEMA_VERSION,
+                schema_version: crate::types::SUBSCRIPTION_PAUSED_EVENT_SCHEMA_VERSION,
                 contract_id: env.current_contract_address(),
             },
         );

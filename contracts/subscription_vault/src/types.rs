@@ -31,6 +31,13 @@ pub const LIFETIME_CAP_REACHED_EVENT_SCHEMA_VERSION: u32 = 4;
 pub const PROTOCOL_FEE_CHARGED_EVENT_SCHEMA_VERSION: u32 = 4;
 pub const FEE_CONVERTED_EVENT_SCHEMA_VERSION: u32 = 4;
 pub const SUBSCRIPTION_AUTO_PAUSED_EVENT_SCHEMA_VERSION: u32 = 4;
+/// Schema version for [`SubscriptionPausedEvent`].
+///
+/// Bumped to 4 when `initiator_role` was added (issue #346) to allow
+/// off-chain indexers to distinguish subscriber-initiated vs merchant-initiated
+/// vs admin/operator-initiated pauses without needing to resolve both party
+/// addresses out-of-band.
+pub const SUBSCRIPTION_PAUSED_EVENT_SCHEMA_VERSION: u32 = 4;
 pub const RECOVERY_EVENT_SCHEMA_VERSION: u32 = 5;
 pub const SUBSCRIBER_WITHDRAWAL_EVENT_SCHEMA_VERSION: u32 = 5;
 pub const DISPUTE_OPENED_EVENT_SCHEMA_VERSION: u32 = 7;
@@ -2708,11 +2715,35 @@ pub struct GraceBuyoutEvent {
     pub contract_id: Address,
 }
 
+/// Who initiated a manual subscription pause.
+///
+/// Carried by [`SubscriptionPausedEvent`] so that off-chain indexers can
+/// reconstruct the pause initiator role without resolving and comparing both
+/// the subscriber and merchant addresses out-of-band.
+///
+/// Added in event schema version 4 (issue #346).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PauseInitiatorRole {
+    /// The subscription's subscriber initiated the pause.
+    Subscriber,
+    /// The subscription's merchant initiated the pause.
+    Merchant,
+    /// An admin or operator initiated the pause (bulk/governance path).
+    Admin,
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct SubscriptionPausedEvent {
     pub subscription_id: u32,
     pub paused_by: Address,
+    /// Role of the party who initiated the pause.
+    ///
+    /// Added in schema version 4 (issue #346). Allows off-chain indexers to
+    /// distinguish subscriber-initiated vs merchant-initiated vs admin/operator
+    /// pauses without resolving both address fields out-of-band.
+    pub initiator_role: PauseInitiatorRole,
     pub timestamp: u64,
     pub schema_version: u32,
     pub contract_id: Address,

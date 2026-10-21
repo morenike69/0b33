@@ -135,11 +135,20 @@ Boundary behavior is verified in `test_expiration.rs`:
 - `test_both_bounds_set_ledger_fires_first` — Earliest bound wins when both are set
 - `test_both_bounds_set_wall_clock_fires_first` — Wall-clock can fire before ledger bound
 
+**Issue #344 — Boundary is inclusive (`>=`), canonical unit tests:**
+
+- `test_is_expired_wall_clock_boundary_inclusive` — Direct unit test of `Subscription::is_expired`:
+  `now = expires_at - 1` → not expired; `now = expires_at` → expired (boundary); `now = expires_at + 1` → expired
+- `test_is_expired_ledger_sequence_boundary_inclusive` — Same semantics for `expires_at_ledger`
+- `test_charge_one_second_before_expiry_succeeds` — End-to-end: charge at `now = expires_at - 1` succeeds;
+  charge at `now = expires_at` is rejected
+
 ## Summary
 
 - **Expiration boundary**: `current_time >= expires_at` (inclusive)
 - **Ledger boundary**: `current_sequence >= expires_at_ledger` (inclusive)
 - **At the exact boundary timestamp/sequence**: subscription is **expired**
+- **One unit before the boundary**: subscription is **not expired** (last valid moment)
 - **Operations rejected**: charge, deposit, charge_usage, cancel
 - **Operations permitted**: withdraw, cleanup, query
-- **Creation validation**: expiration must be strictly in the future
+- **Creation validation**: expiration must be strictly in the future (`expires_at > current_timestamp`)
