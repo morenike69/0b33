@@ -1771,31 +1771,7 @@ impl SubscriptionVault {
     ) -> Result<(), Error> {
         require_not_emergency_stop(&env)?;
         let _guard = crate::reentrancy::ReentrancyGuard::lock(&env, "deposit_funds")?;
-        subscription::do_deposit_funds(
-            &env,
-            subscription_id,
-            subscriber.clone(),
-            amount,
-            nonce,
-        )?;
-        let sub = queries::get_subscription(&env, subscription_id)?;
-        let subscriber = sub.subscriber.clone();
-        let token = sub.token.clone();
-        subscription::do_deposit_funds(&env, subscription_id, amount, idem_key)?;
-        let updated = queries::get_subscription(&env, subscription_id)?;
-        env.events().publish(
-            (types::TOPIC_DEPOSITED, subscription_id),
-            FundsDepositedEvent {
-                subscription_id,
-                subscriber,
-                token,
-                amount,
-                new_balance: updated.prepaid_balance,
-                timestamp: env.ledger().timestamp(),
-                schema_version: crate::types::EVENT_SCHEMA_VERSION,
-            },
-        );
-        Ok(())
+        subscription::do_deposit_funds(&env, subscription_id, amount, nonce)
     }
 
     // ── Delegated Payer ─────────────────────────────────────────────────────
