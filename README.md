@@ -267,6 +267,20 @@ We welcome contributions from the community. Here’s how to get started and how
 - **Soroban**: Use `Env` for storage and auth; keep contract functions narrow and well-documented.
 - **Security**: Any change that touches auth, token transfers, or admin rights will get extra review. When in doubt, open an issue first.
 
+### Oracle governance and security
+
+The contract implements **oracle-gated governance** to prevent price-manipulation attacks:
+
+- **Oracle address changes require quorum-based governance approval** via `submit_proposal(ProposalKind::SetOracleConfig, ...)` and guardian voting, not immediate admin action. A malicious admin cannot redirect price feeds without a 2+ day timelock and supermajority (67%) guardian support.
+- **Other oracle parameters** (max_age, pricing kind, deviation threshold) can be updated via direct admin call with the standard 6-hour CONFIG_COOLDOWN, since they do not expose the contract to price manipulation.
+- The governance system enforces a minimum 2-day timelock (`MIN_TIMELOCK_DELAY`) and 67% quorum (`MIN_QUORUM_BPS`) on all SetOracleConfig proposals.
+
+When modifying oracle-related code, ensure:
+1. Oracle address changes go through `submit_proposal` + `execute_proposal`, never direct admin updates.
+2. Non-address oracle config updates use the cooldown-protected path (`set_oracle_config_except_address`).
+3. All new oracle proposal types are added to the `ProposalKind` enum and validated in `validate_proposal_config`.
+4. Tests confirm that oracle address changes are rejected with `Error::GovernanceRequired` when attempted via direct admin call.
+
 ### Getting help
 
 - **Questions**: Open a [GitHub Discussion](https://github.com/YOUR_ORG/0b33/discussions) or an issue with the “question” label.
