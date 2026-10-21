@@ -82,7 +82,7 @@ pub use types::{
     DisputeRespondedEvent, DisputeStatus, DisputeWindowUpdatedEvent, Error, Proposal,
     ProposalCancelledEvent,
     ProposalExecutedEvent, ProposalKind, ProposalSubmittedEvent, ProposalVotedEvent,
-    ProtocolFeeConfiguredEvent, ResolutionTarget, EVENT_SCHEMA_VERSION,
+    ProtocolFeeConfiguredEvent, EVENT_SCHEMA_VERSION, CANCELLATION_ESCROW_WINDOW_SECS,
 };
 
 // ── Stub modules for features not yet extracted to separate files ─────────────

@@ -273,7 +273,20 @@ fn test_deposit_on_behalf_recovery_ready() {
 
     client.grant_delegated_payer(&subscriber, &payer, &expires_at, &max_amount);
 
+    // Deposit sufficient funds — status must remain InsufficientBalance until
+    // resume_subscription is explicitly called (#342/#251 invariant: the
+    // contract does NOT auto-transition to Active on deposit).
     client.deposit_funds_on_behalf(&sub_id, &payer, &10_000, &None);
+
+    let sub = client.get_subscription(&sub_id);
+    assert_eq!(
+        sub.status,
+        SubscriptionStatus::InsufficientBalance,
+        "deposit alone must not auto-resume; subscriber must call resume_subscription"
+    );
+
+    // Explicitly resume to complete recovery.
+    client.resume_subscription(&sub_id, &subscriber);
 
     let sub = client.get_subscription(&sub_id);
     assert_eq!(sub.status, SubscriptionStatus::Active);

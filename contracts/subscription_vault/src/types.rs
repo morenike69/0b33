@@ -1185,6 +1185,92 @@ pub struct DisputeWindowUpdatedEvent {
     pub contract_id: Address,
 }
 
+// ── Cancellation Escrow ─────────────────────────────────────────────────────
+//
+// NOTE: The escrow path is no longer written by `apply_cancellation` — the
+// refund is now issued immediately as a direct token transfer on cancellation
+// (#343). These types are retained so that:
+//   1. The public `claim_cancellation_escrow` / `get_cancellation_escrow` ABI
+//      endpoints continue to compile (callers will receive `EscrowNotFound`
+//      for subscriptions cancelled after this fix).
+//   2. The `do_withdraw_subscriber_funds` fallback escrow branch continues to
+//      compile as a migration safety net for any escrow records written by
+//      older contract versions.
+
+/// Time window (in seconds) within which a cancellation refund was previously
+/// held in escrow before being claimable. Retained as a named constant so
+/// existing code referencing it compiles; the escrow is no longer created on
+/// fresh cancellations.
+pub const CANCELLATION_ESCROW_WINDOW_SECS: u64 = 72 * 60 * 60; // 72 hours
+
+/// Time-locked refund record held after a subscription cancellation.
+///
+/// After `released_at` elapses the subscriber may call
+/// `claim_cancellation_escrow` to receive the refund. The merchant may call
+/// `dispute_cancellation` before `released_at` to contest the refund.
+///
+/// **No longer written by the cancellation path.** Kept for ABI and migration
+/// compatibility (see module-level note above).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CancellationEscrow {
+    pub subscription_id: u32,
+    /// Token address for the refund.
+    pub token: Address,
+    /// Subscriber who receives the refund.
+    pub subscriber: Address,
+    /// Merchant who may dispute the refund.
+    pub merchant: Address,
+    /// Refund amount in token base units.
+    pub amount: i128,
+    /// Ledger timestamp after which the subscriber may claim the refund.
+    pub released_at: u64,
+}
+
+/// Event emitted when a cancellation escrow is opened (legacy; no longer
+/// emitted by fresh cancellations after #343 fix).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CancellationEscrowOpenedEvent {
+    pub subscription_id: u32,
+    pub subscriber: Address,
+    pub merchant: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub released_at: u64,
+    pub timestamp: u64,
+    /// Event schema version for backwards-compatible indexer decoding.
+    pub schema_version: u32,
+}
+
+/// Event emitted when a cancellation escrow is successfully claimed by the
+/// subscriber after the release window elapses.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CancellationEscrowReleasedEvent {
+    pub subscription_id: u32,
+    pub subscriber: Address,
+    pub amount: i128,
+    pub timestamp: u64,
+    /// Event schema version for backwards-compatible indexer decoding.
+    pub schema_version: u32,
+}
+
+/// Event emitted when a merchant opens a dispute against a cancellation escrow.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CancellationEscrowDisputedEvent {
+    pub subscription_id: u32,
+    pub subscriber: Address,
+    pub merchant: Address,
+    pub amount: i128,
+    pub timestamp: u64,
+    /// Event schema version for backwards-compatible indexer decoding.
+    pub schema_version: u32,
+}
+
+// ── Governance ───────────────────────────────────────────────────────────────
+
 /// Governance proposal types that require multi-sig guardian approval.
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
